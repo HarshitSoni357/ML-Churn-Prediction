@@ -1,0 +1,32 @@
+﻿# Python environments
+.venv/
+.venv-*/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Datasets and generated data
+data/
+
+# Local MLflow tracking and artifacts
+mlflow.db
+mlflow.db-shm
+mlflow.db-wal
+mlruns/
+mlartifacts/
+
+# Ignore experiment artifacts, but keep the selected deployment bundle
+artifacts/*
+!artifacts/deployment/
+!artifacts/deployment/**
+
+# Logs and editor files
+*.log
+.vscode/
+.idea/
