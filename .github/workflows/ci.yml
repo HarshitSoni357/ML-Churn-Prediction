@@ -41,8 +41,8 @@ jobs:
       - name: Run API tests
         run: python -m pytest tests/test_api.py -v
 
-       - name: Run deployment artifact integrity tests
-         run: python -m pytest tests/test_deployment_artifact.py -v
+      - name: Run deployment artifact integrity tests
+        run: python -m pytest tests/test_deployment_artifact.py -v
 
       - name: Run temporal boundary tests
         run: >
