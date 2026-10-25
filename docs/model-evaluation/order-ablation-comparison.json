@@ -1,0 +1,46 @@
+{
+  "full_model": {
+    "roc_auc": 0.6873863306586774,
+    "pr_auc": 0.2386265225207132,
+    "brier_score": 0.11696962022551141,
+    "capacity_pct": 30.000029281462197,
+    "precision_at_30pct": 0.263171764889609,
+    "recall_at_30pct": 0.5408175545571245,
+    "f1_at_30pct": 0.3540542315015429
+  },
+  "without_90d_aggregates": {
+    "roc_auc": 0.6879899787026171,
+    "pr_auc": 0.23816401580804894,
+    "brier_score": 0.11697218280658579,
+    "capacity_pct": 30.000029281462197,
+    "precision_at_30pct": 0.26246901048275323,
+    "recall_at_30pct": 0.5393733953786907,
+    "f1_at_30pct": 0.3531087912809402,
+    "training_seconds": 296.89,
+    "removed_features": [
+      "orders_count_90d",
+      "orders_sum_90d",
+      "orders_mean_90d"
+    ]
+  },
+  "without_all_90d_order_features": {
+    "roc_auc": 0.686950864204252,
+    "pr_auc": 0.23708186770537526,
+    "brier_score": 0.11698141642229667,
+    "capacity_pct": 30.000029281462197,
+    "precision_at_30pct": 0.2622152380580553,
+    "recall_at_30pct": 0.5388518934531451,
+    "f1_at_30pct": 0.3527673823123892,
+    "training_seconds": 270.05,
+    "removed_features": [
+      "orders_count_90d",
+      "orders_sum_90d",
+      "orders_mean_90d",
+      "orders_category_electronics_90d",
+      "orders_category_home_90d",
+      "orders_category_services_90d",
+      "orders_category_appliances_90d",
+      "orders_category_other_90d"
+    ]
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "created_at_utc": "2026-10-25T11:26:02.515321+00:00",
+  "evaluation_dataset": "data\\processed\\splits\\validation.csv",
+  "evaluation_split": "validation",
+  "test_set_used": false,
+  "target": "inactive_next_30d",
+  "sample_count": 341513,
+  "positive_rate": 0.14598565793981488,
+  "champion_uri": "models:/CustomerInactivityRandomForest/1",
+  "candidate_uri": "models:/CustomerInactivityXGBoost/3",
+  "feature_schema": {
+    "champion_feature_count": 78,
+    "candidate_feature_count": 78,
+    "same_feature_names": true,
+    "same_feature_order": false,
+    "champion_only_features": [],
+    "candidate_only_features": []
+  },
+  "metrics": {
+    "champion": {
+      "roc_auc": 0.6873863306586774,
+      "pr_auc": 0.2386265225207132,
+      "brier_score": 0.11696962022551141
+    },
+    "candidate": {
+      "roc_auc": 0.6864060160185151,
+      "pr_auc": 0.2357584984986728,
+      "brier_score": 0.11703597009181976
+    },
+    "candidate_minus_champion": {
+      "roc_auc": -0.0009803146401622387,
+      "pr_auc": -0.002868024022040394,
+      "brier_score": 6.634986630835171e-05
+    }
+  },
+  "promotion_gates": {
+    "max_roc_auc_regression": 0.005,
+    "max_pr_auc_regression_fraction": 0.02,
+    "max_brier_regression_fraction": 0.05,
+    "min_roc_auc_improvement": 0.002,
+    "min_pr_auc_improvement_fraction": 0.02
+  },
+  "decision": {
+    "safety_gates": {
+      "roc_auc_non_regression": true,
+      "pr_auc_non_regression": true,
+      "brier_score_non_regression": true
+    },
+    "meaningful_improvement": {
+      "roc_auc_improvement": false,
+      "pr_auc_improvement": false
+    },
+    "all_safety_gates_passed": true,
+    "meaningful_improvement_found": false,
+    "eligible_for_release_review": false,
+    "decision": "DO_NOT_PROMOTE",
+    "note": "Eligibility is not an automatic deployment. Review model schema, calibration, segment performance, operational behavior, and release/rollback readiness before deployment."
+  }
+}

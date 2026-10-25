@@ -1,0 +1,18 @@
+groups:
+  - name: customer-inactivity-api
+    rules:
+      - alert: APIHighServerErrorRate
+        expr: |
+          (
+            sum(rate(api_requests_total{status=~"5.."}[5m]))
+            /
+            clamp_min(sum(rate(api_requests_total[5m])), 0.001)
+          ) > 0.05
+          and
+          sum(rate(api_requests_total[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated API server error rate"
+          description: "More than 5% of API requests are returning 5xx responses for 5 minutes."

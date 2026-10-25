@@ -3,33 +3,35 @@ import hashlib
 import json
 import logging
 import math
-import threading
 import time
-from collections import Counter
 from pathlib import Path
 from typing import Any
 
 import joblib
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi.responses import Response
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    Counter as PrometheusCounter,
+    Histogram,
+    generate_latest,
+)
+from pydantic import BaseModel, ConfigDict
 
-
-# -------------------------------------------------------------------
+# ---------------------------------------------------------------------
 # Configuration
-# -------------------------------------------------------------------
+# ---------------------------------------------------------------------
 
 ROOT = Path(__file__).resolve().parents[2]
-DEPLOYMENT_DIR = ROOT / "artifacts" / "deployment"
 
-MODEL_PATH = DEPLOYMENT_DIR / "random_forest_v1.joblib"
-METADATA_PATH = DEPLOYMENT_DIR / "model_metadata.json"
+MODEL_PATH = ROOT / "artifacts" / "deployment" / "random_forest_v1.joblib"
+METADATA_PATH = ROOT / "artifacts" / "deployment" / "model_metadata.json"
 
 MODEL_NAME = "CustomerInactivityRandomForest"
 MODEL_VERSION = "1"
 MODEL_ID = f"{MODEL_NAME}-v{MODEL_VERSION}"
-TARGET_NAME = "inactive_next_30d"
+TARGET = "inactive_next_30d"
 
 CATEGORICAL_FEATURES = {
     "region",
@@ -39,142 +41,204 @@ CATEGORICAL_FEATURES = {
     "billing_cycle",
 }
 
-METRICS_PATHS = {"/health", "/metrics"}
-
-
-# -------------------------------------------------------------------
+# ---------------------------------------------------------------------
 # Logging
-# -------------------------------------------------------------------
+# ---------------------------------------------------------------------
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(message)s",
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 
 logger = logging.getLogger("customer_inactivity_api")
 
 
-def log_event(event: dict[str, Any]) -> None:
-    """Emit one JSON-formatted log event."""
-    logger.info(json.dumps(event, allow_nan=False))
-
-
-# -------------------------------------------------------------------
-# Model loading and artifact verification
-# -------------------------------------------------------------------
-
-def load_deployment_model():
-    if not MODEL_PATH.is_file():
-        raise RuntimeError(f"Model artifact not found: {MODEL_PATH}")
-
-    if not METADATA_PATH.is_file():
-        raise RuntimeError(f"Model metadata not found: {METADATA_PATH}")
-
-    metadata = json.loads(
-        METADATA_PATH.read_text(encoding="utf-8")
+def log_event(event: str, **fields: Any) -> None:
+    """Write structured logs without customer feature values."""
+    logger.info(
+        json.dumps(
+            {"event": event, **fields},
+            default=str,
+        )
     )
 
+
+# ---------------------------------------------------------------------
+# Model loading and integrity verification
+# ---------------------------------------------------------------------
+
+
+def load_deployment_model():
+    """Load the deployment model after validating its metadata and hash."""
+
+    if not MODEL_PATH.is_file():
+        raise FileNotFoundError(f"Deployment model not found: {MODEL_PATH}")
+
+    if not METADATA_PATH.is_file():
+        raise FileNotFoundError(
+            f"Model metadata not found: {METADATA_PATH}"
+        )
+
+    with METADATA_PATH.open("r", encoding="utf-8") as file:
+        metadata = json.load(file)
+
     if metadata.get("model_name") != MODEL_NAME:
-        raise RuntimeError("Unexpected model name in metadata.")
+        raise ValueError("Unexpected model name in deployment metadata.")
 
     if str(metadata.get("model_version")) != MODEL_VERSION:
-        raise RuntimeError("Unexpected model version in metadata.")
+        raise ValueError("Unexpected model version in deployment metadata.")
 
-    if metadata.get("target") != TARGET_NAME:
-        raise RuntimeError("Unexpected prediction target in metadata.")
+    metadata_target = metadata.get("target", metadata.get("target_column"))
+    if metadata_target != TARGET:
+        raise ValueError("Unexpected prediction target in deployment metadata.")
 
-    expected_hash = metadata.get("sha256")
-    actual_hash = hashlib.sha256(
-        MODEL_PATH.read_bytes()
-    ).hexdigest()
+    # Support common checksum key names.
+    expected_hash = next(
+        (
+            metadata[key]
+            for key in (
+                "sha256",
+                "model_sha256",
+                "model_checksum_sha256",
+                "checksum_sha256",
+            )
+            if metadata.get(key)
+        ),
+        None,
+    )
 
-    if not expected_hash or actual_hash != expected_hash:
-        raise RuntimeError(
-            "Model checksum verification failed."
+    if not isinstance(expected_hash, str):
+        raise ValueError(
+            "Deployment metadata is missing a SHA-256 checksum."
         )
 
-    # Only load serialized artifacts from this trusted project.
-    loaded_model = joblib.load(MODEL_PATH)
+    actual_hash = hashlib.sha256(MODEL_PATH.read_bytes()).hexdigest()
 
-    features = metadata.get("features")
+    if actual_hash.lower() != expected_hash.lower():
+        raise ValueError(
+            "Deployment model checksum mismatch. "
+            "Refusing to load the model."
+        )
+
+    features = metadata.get(
+        "features",
+        metadata.get("feature_names"),
+    )
 
     if not isinstance(features, list) or not features:
-        raise RuntimeError("Invalid feature schema in metadata.")
-
-    if list(loaded_model.feature_names_in_) != features:
-        raise RuntimeError(
-            "Model feature names do not match deployment metadata."
+        raise ValueError(
+            "Deployment metadata must contain a non-empty feature list."
         )
 
-    if len(features) != metadata.get("feature_count"):
-        raise RuntimeError(
-            "Feature count does not match deployment metadata."
+    if len(features) != len(set(features)):
+        raise ValueError("Duplicate feature names found in model metadata.")
+
+    model = joblib.load(MODEL_PATH)
+
+    if not hasattr(model, "predict_proba"):
+        raise ValueError("Deployment model does not support predict_proba.")
+
+    if not hasattr(model, "feature_names_in_"):
+        raise ValueError(
+            "Model is missing feature_names_in_; "
+            "cannot verify its input schema."
         )
 
-    if 1 not in list(loaded_model.classes_):
-        raise RuntimeError(
-            "Model does not contain positive class 1."
+    model_features = list(model.feature_names_in_)
+
+    if model_features != features:
+        raise ValueError(
+            "Model feature names or order do not match deployment metadata."
         )
 
-    log_event({
-        "event": "model_loaded",
-        "model_name": MODEL_NAME,
-        "model_version": MODEL_ID,
-        "feature_count": len(features),
-        "checksum_verified": True,
-    })
+    if 1 not in list(model.classes_):
+        raise ValueError("Model does not contain the positive class 1.")
 
-    return loaded_model, features, metadata
+    metadata_feature_count = metadata.get("feature_count")
+    if (
+        metadata_feature_count is not None
+        and int(metadata_feature_count) != len(features)
+    ):
+        raise ValueError("Feature count does not match deployment metadata.")
+
+    log_event(
+        "model_loaded",
+        model_name=MODEL_NAME,
+        model_version=MODEL_ID,
+        feature_count=len(features),
+        checksum_verified=True,
+    )
+
+    return model, features, metadata
 
 
 model, FEATURES, MODEL_METADATA = load_deployment_model()
 
+POSITIVE_CLASS_INDEX = list(model.classes_).index(1)
 
-# -------------------------------------------------------------------
-# In-memory metrics
-# -------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Prometheus metrics
+# ---------------------------------------------------------------------
 
-_metrics_lock = threading.Lock()
+# The Python Counter API appends "_total" to the exported counter name.
+API_REQUESTS = PrometheusCounter(
+    "api_requests",
+    "Total HTTP requests.",
+    ["method", "path", "status"],
+)
 
-_request_counts = Counter()
-_request_duration_seconds_sum = Counter()
+API_REQUEST_DURATION = Histogram(
+    "api_request_duration_seconds",
+    "HTTP request duration in seconds.",
+    ["method", "path"],
+    buckets=(
+        0.005,
+        0.01,
+        0.025,
+        0.05,
+        0.1,
+        0.25,
+        0.5,
+        1.0,
+        2.5,
+        5.0,
+    ),
+)
 
-_prediction_count = 0
-_prediction_probability_sum = 0.0
+MODEL_PREDICTIONS = PrometheusCounter(
+    "model_predictions",
+    "Total successful predictions.",
+)
 
-# These counters are cumulative and reset when the process restarts.
-_probability_bounds = ("0.10", "0.25", "0.50", "0.75", "1.00")
-_probability_buckets = Counter()
+PREDICTION_PROBABILITY = Histogram(
+    "prediction_probability",
+    "Distribution of successful prediction probabilities.",
+    buckets=(0.10, 0.25, 0.50, 0.75, 1.00),
+)
 
-
-# -------------------------------------------------------------------
-# Application
-# -------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# FastAPI application
+# ---------------------------------------------------------------------
 
 app = FastAPI(
     title="Customer Inactivity Prediction API",
     description=(
-        "Predicts the probability that an eligible customer "
-        "will become inactive in the next 30 days."
+        "Predicts the probability that a customer will be inactive "
+        "over the next 30 days."
     ),
-    version="1.0.0",
+    version=MODEL_ID,
 )
 
 
-# -------------------------------------------------------------------
+# ---------------------------------------------------------------------
 # Request and response schemas
-# -------------------------------------------------------------------
+# ---------------------------------------------------------------------
+
 
 class PredictionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    features: dict[str, Any] = Field(
-        ...,
-        description=(
-            "Feature names and values for one customer snapshot. "
-            "Send null for missing values."
-        ),
-    )
+    features: dict[str, Any]
 
 
 class PredictionResponse(BaseModel):
@@ -183,16 +247,95 @@ class PredictionResponse(BaseModel):
     target: str
 
 
-# -------------------------------------------------------------------
-# Request logging and HTTP metrics
-# -------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Request validation
+# ---------------------------------------------------------------------
+
+
+def validate_features(raw_features: dict[str, Any]) -> pd.DataFrame:
+    """Validate the exact model input schema and build an ordered DataFrame."""
+
+    expected = set(FEATURES)
+    received = set(raw_features)
+
+    missing = sorted(expected - received)
+    unexpected = sorted(received - expected)
+
+    if missing or unexpected:
+        details = {}
+
+        if missing:
+            details["missing_features"] = missing
+
+        if unexpected:
+            details["unexpected_features"] = unexpected
+
+        raise HTTPException(
+            status_code=422,
+            detail=details,
+        )
+
+    cleaned: dict[str, Any] = {}
+
+    for feature in FEATURES:
+        value = raw_features[feature]
+
+        if feature in CATEGORICAL_FEATURES:
+            if value is not None and not isinstance(value, str):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Feature '{feature}' must be a string or null."
+                    ),
+                )
+
+            cleaned[feature] = value
+
+        else:
+            if value is None:
+                # Preserve missing numeric values for the model's
+                # configured preprocessing pipeline.
+                cleaned[feature] = float("nan")
+                continue
+
+            # bool is a subclass of int in Python, so reject it explicitly.
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Feature '{feature}' must be numeric or null."
+                    ),
+                )
+
+            numeric_value = float(value)
+
+            if not math.isfinite(numeric_value):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Feature '{feature}' must be a finite number."
+                    ),
+                )
+
+            cleaned[feature] = numeric_value
+
+    # Preserve the exact training-time feature order.
+    return pd.DataFrame(
+        [[cleaned[feature] for feature in FEATURES]],
+        columns=FEATURES,
+    )
+
+
+# ---------------------------------------------------------------------
+# HTTP observability middleware
+# ---------------------------------------------------------------------
+
 
 @app.middleware("http")
-async def observe_requests(
-    request: Request,
-    call_next,
-):
+async def observe_requests(request: Request, call_next):
     start_time = time.perf_counter()
+
+    method = request.method
     status_code = 500
 
     try:
@@ -200,245 +343,118 @@ async def observe_requests(
         status_code = response.status_code
         return response
 
-    except Exception:
-        log_event({
-            "event": "request_failed",
-            "method": request.method,
-            "path": request.url.path,
-            "status_code": 500,
-        })
-        logger.exception("Unhandled HTTP request exception")
-        raise
-
     finally:
         duration = time.perf_counter() - start_time
-        path = request.url.path
-        method = request.method
 
-        with _metrics_lock:
-            _request_counts[(method, path, status_code)] += 1
-            _request_duration_seconds_sum[(method, path)] += duration
+        # Use route templates where available to avoid creating a
+        # different metric series for every arbitrary URL.
+        route = request.scope.get("route")
+        route_path = getattr(route, "path", None)
 
-        # Avoid logging request bodies, customer features, or predictions.
-        log_event({
-            "event": "http_request",
-            "method": method,
-            "path": path,
-            "status_code": status_code,
-            "duration_ms": round(duration * 1000, 2),
-        })
+        if route_path in {"/health", "/predict", "/metrics"}:
+            path = route_path
+        else:
+            path = "unmatched"
 
+        API_REQUESTS.labels(
+            method=method,
+            path=path,
+            status=str(status_code),
+        ).inc()
 
-# -------------------------------------------------------------------
-# Feature validation
-# -------------------------------------------------------------------
+        API_REQUEST_DURATION.labels(
+            method=method,
+            path=path,
+        ).observe(duration)
 
-def validate_features(
-    input_features: dict[str, Any],
-) -> pd.DataFrame:
-    """Validate one feature record and preserve training column order."""
-
-    expected = set(FEATURES)
-    provided = set(input_features)
-
-    missing = sorted(expected - provided)
-    unexpected = sorted(provided - expected)
-
-    if missing or unexpected:
-        details = []
-
-        if missing:
-            details.append(f"Missing features: {missing}")
-
-        if unexpected:
-            details.append(f"Unexpected features: {unexpected}")
-
-        raise HTTPException(
-            status_code=422,
-            detail="; ".join(details),
+        # Never log request bodies or customer feature values.
+        log_event(
+            "http_request",
+            method=method,
+            path=path,
+            status_code=status_code,
+            duration_seconds=round(duration, 6),
         )
 
-    row = {}
 
-    for feature in FEATURES:
-        value = input_features[feature]
-
-        if feature in CATEGORICAL_FEATURES:
-            if value is not None and not isinstance(value, str):
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"'{feature}' must be a string or null.",
-                )
-
-            row[feature] = value
-            continue
-
-        if value is None:
-            row[feature] = float("nan")
-            continue
-
-        if isinstance(value, bool) or not isinstance(
-            value, (int, float)
-        ):
-            raise HTTPException(
-                status_code=422,
-                detail=f"'{feature}' must be numeric or null.",
-            )
-
-        numeric_value = float(value)
-
-        if not math.isfinite(numeric_value):
-            raise HTTPException(
-                status_code=422,
-                detail=f"'{feature}' must be finite. Use null if missing.",
-            )
-
-        row[feature] = numeric_value
-
-    return pd.DataFrame([row], columns=FEATURES)
-
-
-# -------------------------------------------------------------------
+# ---------------------------------------------------------------------
 # Health endpoint
-# -------------------------------------------------------------------
+# ---------------------------------------------------------------------
+
 
 @app.get("/health")
 def health():
-    """Report application and loaded-model health."""
-
     return {
         "status": "healthy",
         "model_name": MODEL_NAME,
         "model_version": MODEL_ID,
-        "target": TARGET_NAME,
+        "target": TARGET,
         "feature_count": len(FEATURES),
         "model_checksum_verified": True,
     }
 
 
-# -------------------------------------------------------------------
+# ---------------------------------------------------------------------
 # Prediction endpoint
-# -------------------------------------------------------------------
+# ---------------------------------------------------------------------
+
 
 @app.post("/predict", response_model=PredictionResponse)
 def predict(request: PredictionRequest):
-    """Predict the probability of inactivity in the next 30 days."""
-
-    global _prediction_count, _prediction_probability_sum
-
     try:
         input_df = validate_features(request.features)
 
         probabilities = model.predict_proba(input_df)
-        positive_class_index = list(model.classes_).index(1)
-
         probability = float(
-            probabilities[0, positive_class_index]
+            probabilities[0][POSITIVE_CLASS_INDEX]
         )
 
-        with _metrics_lock:
-            _prediction_count += 1
-            _prediction_probability_sum += probability
+        if not math.isfinite(probability) or not 0.0 <= probability <= 1.0:
+            raise RuntimeError(
+                "Model returned an invalid prediction probability."
+            )
 
-            for bound in _probability_bounds:
-                if probability <= float(bound):
-                    _probability_buckets[bound] += 1
+        # Record model metrics only after a successful prediction.
+        MODEL_PREDICTIONS.inc()
+        PREDICTION_PROBABILITY.observe(probability)
 
-        log_event({
-            "event": "prediction_completed",
-            "model_version": MODEL_ID,
-            "prediction_count": 1,
-        })
+        log_event(
+            "prediction_succeeded",
+            model_version=MODEL_ID,
+            target=TARGET,
+            probability=round(probability, 6),
+        )
 
         return PredictionResponse(
             model_version=MODEL_ID,
             inactivity_probability=probability,
-            target=TARGET_NAME,
+            target=TARGET,
         )
 
     except HTTPException:
+        # Preserve intentional client-facing validation errors.
         raise
 
-    except Exception as exc:
-        logger.exception("Prediction failed")
+    except Exception:
+        logger.exception(
+            "Prediction failed for model %s",
+            MODEL_ID,
+        )
 
         raise HTTPException(
             status_code=500,
-            detail="Prediction failed. Check the API server logs.",
-        ) from exc
+            detail="Prediction failed. Check service logs.",
+        ) from None
 
 
-# -------------------------------------------------------------------
-# Prometheus-compatible metrics endpoint
-# -------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Prometheus scrape endpoint
+# ---------------------------------------------------------------------
 
-@app.get("/metrics", response_class=PlainTextResponse)
+
+@app.get("/metrics", include_in_schema=False)
 def metrics():
-    """Expose basic process-local metrics in Prometheus text format."""
-
-    with _metrics_lock:
-        request_counts = dict(_request_counts)
-        duration_sums = dict(_request_duration_seconds_sum)
-        prediction_count = _prediction_count
-        probability_sum = _prediction_probability_sum
-        bucket_counts = dict(_probability_buckets)
-
-    lines = [
-        "# HELP api_requests_total Total HTTP requests.",
-        "# TYPE api_requests_total counter",
-    ]
-
-    for (method, path, status), count in sorted(
-        request_counts.items()
-    ):
-        lines.append(
-            f'api_requests_total{{method="{method}",'
-            f'path="{path}",status="{status}"}} {count}'
-        )
-
-    lines.extend([
-        "",
-        "# HELP api_request_duration_seconds_sum "
-        "Cumulative HTTP request duration in seconds.",
-        "# TYPE api_request_duration_seconds_sum counter",
-    ])
-
-    for (method, path), duration_sum in sorted(
-        duration_sums.items()
-    ):
-        lines.append(
-            f'api_request_duration_seconds_sum{{'
-            f'method="{method}",path="{path}"}} {duration_sum:.6f}'
-        )
-
-    lines.extend([
-        "",
-        "# HELP model_predictions_total Total successful predictions.",
-        "# TYPE model_predictions_total counter",
-        f"model_predictions_total {prediction_count}",
-        "",
-        "# HELP prediction_probability_sum "
-        "Sum of successful prediction probabilities.",
-        "# TYPE prediction_probability_sum counter",
-        f"prediction_probability_sum {probability_sum:.8f}",
-        "",
-        "# HELP prediction_probability_bucket "
-        "Cumulative counts of prediction probabilities.",
-        "# TYPE prediction_probability_bucket counter",
-    ])
-
-    cumulative = 0
-
-    for bound in _probability_bounds:
-        cumulative += bucket_counts.get(bound, 0)
-        lines.append(
-            f'prediction_probability_bucket{{le="{bound}"}} '
-            f"{cumulative}"
-        )
-
-    lines.append(
-        f'prediction_probability_bucket{{le="+Inf"}} '
-        f"{prediction_count}"
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST,
     )
-
-    return "\n".join(lines) + "\n"

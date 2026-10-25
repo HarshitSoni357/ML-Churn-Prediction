@@ -1,0 +1,35 @@
+[
+  {
+    "experiment": "segment_only",
+    "feature_count": 1,
+    "numeric_feature_count": 0,
+    "categorical_feature_count": 1,
+    "roc_auc": 0.6867506409214804,
+    "pr_auc": 0.2266317671314746,
+    "brier_score": 0.11692900142163634,
+    "training_seconds": 2.46,
+    "validation_rows": 341513
+  },
+  {
+    "experiment": "behavior_only",
+    "feature_count": 63,
+    "numeric_feature_count": 63,
+    "categorical_feature_count": 0,
+    "roc_auc": 0.6689452253360875,
+    "pr_auc": 0.22505773512641436,
+    "brier_score": 0.11947690819008866,
+    "training_seconds": 55.43,
+    "validation_rows": 341513
+  },
+  {
+    "experiment": "full_model",
+    "feature_count": 78,
+    "numeric_feature_count": 73,
+    "categorical_feature_count": 5,
+    "roc_auc": 0.6861801112615347,
+    "pr_auc": 0.23806301800303786,
+    "brier_score": 0.11694203865763694,
+    "training_seconds": 74.5,
+    "validation_rows": 341513
+  }
+]

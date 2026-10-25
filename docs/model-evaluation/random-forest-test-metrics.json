@@ -1,0 +1,15 @@
+{
+  "evaluation_type": "final_held_out_test",
+  "selected_model": "random_forest",
+  "model_path": "artifacts\\random_forest\\model.joblib",
+  "test_rows": 939500,
+  "feature_count": 78,
+  "test_positive_rate": 0.14432570516232038,
+  "metrics": {
+    "roc_auc": 0.690005977366682,
+    "pr_auc": 0.23734280389043166,
+    "brier_score": 0.11570530784681152
+  },
+  "evaluated_at_utc": "2026-10-24T09:47:55.997192+00:00",
+  "note": "Test metrics are for final evaluation, not for iterative model tuning. Threshold selection remains a separate business decision."
+}
